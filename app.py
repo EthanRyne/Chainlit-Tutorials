@@ -46,6 +46,28 @@ def start_ollama():
     thread.daemon = True
     thread.start()
 
+# 3️⃣ Document Reader Function
+
+def read_documents(documents):
+    """
+    Recieves a list of chainlit file type, filters and opens them based on their extension
+    Returns a text body containing al the file names along with their contents
+    """
+    text = ''
+    for document in documents:
+        if document.path.endswith('pdf'):
+            doc = fitz.open(document.path)
+            text += '\n\nFile: ' + document.name + '\n'
+            for page in doc:
+                text += page.get_text()
+        elif document.path.endswith('docx'):
+            doc = Document(document.path)
+            text += '\n\nFile: ' + document.name + '\n' + '\n'.join([para.text for para in doc.paragraphs])
+        elif document.path.endswith('txt'):
+            with open(document.path, 'r') as f:
+                text += '\n\nFile: ' + document.name + '\n' + f.read()
+    return text
+
 # 4️⃣ Authentication Callback
 
 @cl.password_auth_callback
@@ -106,8 +128,20 @@ async def on_message(message: cl.message):
     chat_history = cl.user_session.get("chat_history")
     model = "qwen2.5:0.5b"  # Selected LLM model hosted in Ollama
 
+    files = [file for file in message.elements]
+    if files:
+        async with cl.Step('Reading Documents') as reading_documents:
+            await reading_documents.send()
+            loop = asyncio.get_event_loop()
+            document_data = await loop.run_in_executor(None, read_documents, files)
+            content = f'The user has uploaded the following files {document_data}, assist them in their queries if related to the uploaded files'
+            print(content)
+            chat_history.append({'role':'system', 'content':content})
+            time.sleep(4)
+            await reading_documents.remove()
+            
     chat_history.append({'role':'user', 'content':message.content})
-
+    
     cb = cl.Message(content="")
     await cb.send()
 
