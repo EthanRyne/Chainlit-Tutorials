@@ -13,6 +13,10 @@ import subprocess
 import threading
 import requests
 import asyncio
+import fitz
+import time
+
+from docx import Document
 from dotenv import load_dotenv
 from typing import Dict, Optional
 
@@ -137,7 +141,7 @@ async def on_message(message: cl.message):
             content = f'The user has uploaded the following files {document_data}, assist them in their queries if related to the uploaded files'
             print(content)
             chat_history.append({'role':'system', 'content':content})
-            time.sleep(4)
+            time.sleep(4) # Not required
             await reading_documents.remove()
             
     chat_history.append({'role':'user', 'content':message.content})
