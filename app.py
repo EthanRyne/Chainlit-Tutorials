@@ -22,10 +22,12 @@ from typing import Dict, Optional
 
 import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+from chainlit.input_widget import Select, Switch
 from chainlit.types import ThreadDict
 
-# 2️⃣ Load Environment Variables
+# 2️⃣ Load Environment Variables and Define Global Variables
 load_dotenv()
+models = ['qwen3:0.6b','qwen2.5:0.5b']
 
 # NOTE: These environment variables are hardcoded for demonstration.
 # In production, keep them in your .env file for better security.
@@ -88,9 +90,22 @@ def auth_callback(username: str, password: str):
 async def on_chat_start():
     """
     Called when a new chat session starts. It starts Ollama and initializes chat history.
+    Setting up a settings widget for model handling
     """
     start_ollama()
     cl.user_session.set('chat_history', [])
+    settings = await cl.ChatSettings(
+        [
+            Select(
+                id="Model",
+                label='Qwen3',
+                values=['qwen3:0.6b','qwen2.5:0.5b'],
+                initial_index=0
+            ),
+            Switch(id='Think', label="Enable thinking for qwen3 models", initial=True)
+        ]
+    ).send()
+    cl.user_session.set("settings", settings)
 
 # 6️⃣ Database Layer for Chat History Persistence
 
@@ -107,10 +122,22 @@ def get_data_layer():
 async def on_chat_resume(thread: ThreadDict):
     """
     Reload previous chat history when resuming a chat thread.
+    Setup a new settings widget each time you resume chat thread.
     """
     start_ollama()
     cl.user_session.set("chat_history", [])
-    
+    settings = await cl.ChatSettings(
+        [
+            Select(
+                id="Model",
+                label='Qwen3',
+                values=['qwen3:0.6b','qwen2.5:0.5b'],
+                initial_index=0
+            ),
+            Switch(id='Think', label="Enable thinking for qwen3 models", initial=True)
+        ]
+    ).send()
+    cl.user_session.set("settings", settings)
     for message in thread['steps']:
         if message['type'] == 'user_message':
             cl.user_session.get("chat_history").append(
@@ -127,11 +154,18 @@ async def on_chat_resume(thread: ThreadDict):
 async def on_message(message: cl.message):
     """
     Main chat handler which takes incoming user message, forwards it to Ollama LLM, 
-    streams back response, and updates chat history.
+    streams back response, and updates chat history, 
+    reads documents and displays chain of thought tokens in Thinking Step.
     """
     chat_history = cl.user_session.get("chat_history")
-    model = "qwen2.5:0.5b"  # Selected LLM model hosted in Ollama
+    settings = cl.user_session.get("settings")
 
+    global models
+    
+    model = settings['Model']
+    settings['Think'] = False if settings['Think'] and model == models[1] else settings['Think']
+
+    # Reading Files
     files = [file for file in message.elements]
     if files:
         async with cl.Step('Reading Documents') as reading_documents:
@@ -146,29 +180,42 @@ async def on_message(message: cl.message):
             
     chat_history.append({'role':'user', 'content':message.content})
     
-    cb = cl.Message(content="")
-    await cb.send()
-
-    def generate_chunks():
-        return ollama.chat(
+    stream = ollama.chat(
             model=model,
             messages=chat_history,
             stream=True,
-            options={'stop': ['<|im_end|>']},
-        )
+            think=settings['Think'])
     
-    loop = asyncio.get_event_loop()
-    stream = await loop.run_in_executor(None, generate_chunks)
-
+    thinking = False
     assistant_response = ''
+    start = time.time() # Calculate time
+    final_answer = cl.Message(content='')
+
+    # Thinking Step
+    if settings["Think"]:
+        async with cl.Step(name='Thinking',type='llm') as thinking_step:
+            for chunk in stream:
+                think = chunk.get("message", {}).get("thinking", "")
+                if think:
+                    thinking = True
+                    await thinking_step.stream_token(think)
+                elif settings["Think"] and thinking:
+                    print('Thinking stopped')
+                    thinking = False
+                    thought_duration = round(time.time()-start)
+                    thinking_step.name = f"Thought for {thought_duration}s"
+                    await thinking_step.update()
+                    break
+    
+    # Final Answer
     for chunk in stream:
         content = chunk.get("message", {}).get("content", "")
         if content:
             assistant_response += content
-            await cb.stream_token(content)
+            await final_answer.stream_token(content)
+
+    await final_answer.send()
 
     chat_history.append({'role':'assistant', 'content':assistant_response})
-
-    await cb.update()
 
 # ✅ Application Setup Completed
